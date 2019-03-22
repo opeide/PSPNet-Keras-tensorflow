@@ -7,6 +7,9 @@ from keras.optimizers import SGD
 import glob
 from PIL import Image
 from keras.callbacks import ModelCheckpoint, TensorBoard
+import tensorflow as tf
+from keras import backend as K
+from sklearn.metrics import confusion_matrix
 
 # red-0-sky, green-1-land, blue-2-sea
 CLASS_ENCODING = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255)}
@@ -17,6 +20,9 @@ def preprocess_img(img_pil):
     centered_img_bgr = centered_img[:, :, ::-1]
     return centered_img_bgr
 
+def mask2img(mask_np):
+    return Image.fromarray((mask_np * 255).astype('uint8'), 'L')
+
 def get_x_y_data(dir_path, img_size=(473,473), n_classes=3, n_samples=-1):
     print('Loading x,y data')
     if n_samples < -1 or n_samples == 0:
@@ -26,6 +32,11 @@ def get_x_y_data(dir_path, img_size=(473,473), n_classes=3, n_samples=-1):
     mask_paths = sorted(glob.glob('{}/masks/*.png'.format(dir_path)))
     if not len(img_paths) == len(mask_paths):
         raise ValueError('Size mismatch: img paths and mask paths!')
+
+    shuffled_indices = np.arange(len(img_paths))
+    np.random.shuffle(shuffled_indices)
+    img_paths = np.array([img_paths[i] for i in shuffled_indices])
+    mask_paths = np.array([mask_paths[i] for i in shuffled_indices])
 
     if n_samples == -1:
         n_samples = len(img_paths)
@@ -54,12 +65,64 @@ def get_x_y_data(dir_path, img_size=(473,473), n_classes=3, n_samples=-1):
             y[n,:,:,class_id] = class_mask
             #Image.fromarray(class_mask.astype(dtype=np.uint8)*255, 'L')
     print('100%')
-    return x,y
+    return x, y, img_paths[:n_samples], mask_paths[:n_samples]
 
+def update_training_data():
+    train_path = '/home/fredrik/sensorfusion/world_tracker/segmentation/training_data'
+    n_samples = 4400
+    x, y, x_paths, y_paths = get_x_y_data(train_path, n_samples=n_samples)
+    n_samples = len(x)
+
+    n_train = int(0.8 * n_samples)
+
+    x_train = x[:int(0.8 * n_train)]
+    y_train = y[:int(0.8 * n_train)]
+    x_train_paths = x_paths[:int(0.8 * n_train)]
+    y_train_paths = y_paths[:int(0.8 * n_train)]
+    x_val = x[int(0.8 * n_train):n_train]
+    y_val = y[int(0.8 * n_train):n_train]
+    x_val_paths = x_paths[int(0.8 * n_train):n_train]
+    y_val_paths = y_paths[int(0.8 * n_train):n_train]
+    x_test = x[n_train:]
+    y_test = y[n_train:]
+    x_test_paths = x_paths[n_train:]
+    y_test_paths = y_paths[n_train:]
+    
+    np.save('train_data/xy_train.npy', (x_train, y_train))
+    np.save('train_data/xy_val.npy', (x_val, y_val))
+    np.save('train_data/xy_test.npy', (x_test, y_test))
+
+    for fileName, paths in [('x_train_paths',x_train_paths),('y_train_paths',y_train_paths),
+                           ('x_val_paths',x_val_paths),('y_val_paths',y_val_paths),
+                           ('x_test_paths',x_test_paths),('y_test_paths',y_test_paths)]:
+        with open('train_data/{}.txt'.format(fileName), 'w+') as f:
+            f.write('\n'.join(paths))
+
+def weighted_categorical_crossentropy(weights):
+    """ weighted_categorical_crossentropy
+
+        Args:
+            * weights<ktensor|nparray|list>: crossentropy weights
+        Returns:
+            * weighted categorical crossentropy function
+    """
+    if isinstance(weights,list) or isinstance(np.ndarray):
+        weights=K.variable(weights)
+
+    def loss(target,output,from_logits=False):
+        if not from_logits:
+            output /= tf.reduce_sum(output,
+                                    len(output.get_shape()) - 1,
+                                    True)
+            _epsilon = tf.convert_to_tensor(K.epsilon(), dtype=output.dtype.base_dtype)
+            output = tf.clip_by_value(output, _epsilon, 1. - _epsilon)
+            weighted_losses = target * tf.log(output) * weights
+            return - tf.reduce_sum(weighted_losses,len(output.get_shape()) - 1)
+        else:
+            raise ValueError('WeightedCategoricalCrossentropy: not valid with logits')
+    return loss
 
 def get_compiled_model(model_name, lrn_rate, checkpoint=None):
-    dir_name = 'weights/keras'
-
     json_path = join("weights", "keras", model_name + ".json")
     h5_path = join("weights", "keras", model_name + ".h5")
     if isfile(json_path) and isfile(h5_path):
@@ -74,7 +137,7 @@ def get_compiled_model(model_name, lrn_rate, checkpoint=None):
             model.load_weights(h5_path)
     sgd = SGD(lr=lrn_rate, momentum=0.9, nesterov=True)
     model.compile(optimizer=sgd,
-                  loss='categorical_crossentropy',
+                  loss=weighted_categorical_crossentropy([5.0, 10.0, 1.4]),
                   metrics=['accuracy'])
     return model
 
@@ -97,60 +160,87 @@ def overfit_test():
               epochs=1000,
               validation_data=(x_val, y_val))
 
-def train(resume_checkpoint=None):
-    # model = get_compiled_model('pspnet50_custom', 1e-2)
-    train_path = '/home/fredrik/sensorfusion/world_tracker/segmentation/training_data'
-    n_samples = 4400
-    x, y = get_x_y_data(train_path, n_samples=n_samples)
-    n_samples = len(x)
-
-    n_train = int(0.8 * n_samples)
-
-    x_train = x[:int(0.8 * n_train)]
-    y_train = y[:int(0.8 * n_train)]
-    x_val = x[int(0.8 * n_train):n_train]
-    y_val = y[int(0.8 * n_train):n_train]
-    x_test = x[n_train:]
-    y_test = y[n_train:]
-
+def train(resume_checkpoint_path=None):
+    x_train, y_train = np.load('train_data/xy_train.npy')
+    x_val, y_val = np.load('train_data/xy_val.npy')
     print(x_train.shape, y_train.shape)
     print(x_val.shape, y_val.shape)
-    print(x_test.shape, y_test.shape)
 
-    model = get_compiled_model('pspnet50_custom', .5e-3, checkpoint=resume_checkpoint)
 
-    checkpoint_path = 'checkpoints/checkpoint-best.h5'
+    model = get_compiled_model('pspnet50_custom', .5e-3, checkpoint=resume_checkpoint_path)
+
+    resumed = '' if resume_checkpoint_path is None else 'resumed'
+    checkpoint_path = 'checkpoints/'+resumed+'checkpoint-{epoch:03d}-{val_acc:.4f}.h5'
+    print(checkpoint_path)
     checkpoint_callback = ModelCheckpoint(checkpoint_path,
                                           monitor='val_acc',
                                           verbose=1,
                                           save_best_only=True,
-                                          mode='max')
+                                          mode='max',
+                                          save_weights_only=True)
 
     #tensorboard_callback = TensorBoard(log_dir='./Graph', histogram_freq=0, write_graph=True, write_images=True)
 
     model.fit(x_train, y_train,
               batch_size=16,
-              epochs=200,
+              epochs=100,
               validation_data=(x_val, y_val),
               callbacks=[checkpoint_callback])
 
-def mask2img(mask_np):
-    return Image.fromarray((mask_np * 255).astype('uint8'), 'L')
-
-def predict(checkpoint_path):
-    x, y = get_x_y_data('/home/fredrik/sensorfusion/world_tracker/segmentation/training_data', n_samples=1)
-
-    img_np = x[0,:,:,::-1] + DATA_MEAN
-    Image.fromarray(img_np.astype('uint8')).show()
+def evaluate_test(checkpoint_path):
+    print('EVALUATING ON TEST SET. LOADING CHECKPOINT: {}'.format(checkpoint_path))
+    x_test, y_test = np.load('train_data/xy_test.npy')
 
     model = get_compiled_model('pspnet50_custom', .5e-3, checkpoint=checkpoint_path)
+    #score, acc = model.evaluate(x=x_test, y=y_test, batch_size=16, verbose=1)
+    #print('loss: {}'.format(score))
+    #print('acc: {}'.format(acc))
+    y_pred = model.predict(x_test, batch_size=16, verbose=1)
+    print('ANALYZING TEST DATA. CAN BE SLOW')
+    cm = confusion_matrix(np.argmax(y_test, axis=3).flatten(), np.argmax(y_pred, axis=3).flatten())
+    cm = cm.astype('float64')
+    print('Class representation:')
+    for class_id in [0,1,2]:
+        print(class_id, sum(cm[class_id,:])/float(len(y_pred)*473*473))
+    for row in range(cm.shape[0]):
+        cm[row,:] = cm[row,:] / np.sum(cm[row,:])
+    with np.printoptions(precision=3, suppress=True):
+        print('CONFUSION MATRIX:')
+        print(cm)
 
-    output = model.predict(x, batch_size=16, verbose=1)
+def predict_single_test_image(model, n):
+    with open('train_data/x_test_paths.txt', 'r') as f:
+        x_paths = [path.strip() for path in f.readlines()]
+        print(x_paths)
+        predict_img(model, x_paths[n])
 
-    for i in [0,1,2]:
-        out_img = mask2img(output[0,:,:,i])
-        out_img.show()
+def predict_img(model, img_path):
+    img_pil = Image.open(img_path)
+    x = np.array([preprocess_img(img_pil)])
+
+    prediction = model.predict(x, batch_size=1, verbose=1)[0]
+    prediction_img = prediction_to_img(prediction)
+
+    Image.blend(img_pil, prediction_img, 0.25).show()
+
+def prediction_to_img(prediction):
+    max_class = np.argmax(prediction,axis=2)
+    img_np = np.empty((473,473,3),dtype='uint8')
+    for class_id, color in CLASS_ENCODING.items():
+        img_np[max_class==class_id] = color
+
+    return Image.fromarray(img_np)
+
+
 
 if __name__ == '__main__':
-    train()
-    #predict('checkpoints/checkpoint-epoch28-acc0.9607.h5')
+    #update_training_data()
+    #train()
+
+    test_checkpoint = 'checkpoints/checkpoint-008-0.9692.h5'
+    #evaluate_test(test_checkpoint)
+    model = get_compiled_model('pspnet50_custom', .5e-3, checkpoint=test_checkpoint)
+    for i in range(160,200):
+        predict_single_test_image(model,i)
+
+
