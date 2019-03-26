@@ -11,7 +11,7 @@ if __name__ == '__main__':
     source_model = 'pspnet50_ade20k'
     input_shape = (473,473)
     num_classes_new = 3
-    model_name_new = 'pspnet50_custom'
+    model_name_new = 'pspnet50_all-train'
     dir_name = 'weights/keras'
 
 
@@ -27,16 +27,16 @@ if __name__ == '__main__':
     model.load_weights(h5_path, by_name=True)
     model.layers[-3].name = layerNameOld
     #only set final layer trainable
-    for i in range(len(model.layers)):
-        model.layers[i].trainable = False
-    model.layers[-3].trainable = True
+    #for i in range(len(model.layers)):
+    #    model.layers[i].trainable = False
+    #model.layers[-3].trainable = True
     #compile again since changed trainable
     sgd = SGD(lr=1e-3, momentum=0.9, nesterov=True)
     model.compile(optimizer=sgd,
                   loss='categorical_crossentropy',
                   metrics=['accuracy'])
 
-    plot_model(model, to_file='pspnet_compiled_simple.png', show_layer_names=False, show_shapes=True)
+    #plot_model(model, to_file='pspnet_compiled_simple.png', show_layer_names=False, show_shapes=True)
     model.summary()
     #SAVE MODEL
     new_model_json = model.to_json()

@@ -10,6 +10,7 @@ from keras.callbacks import ModelCheckpoint, TensorBoard
 import tensorflow as tf
 from keras import backend as K
 from sklearn.metrics import confusion_matrix
+import datetime
 
 # red-0-sky, green-1-land, blue-2-sea
 CLASS_ENCODING = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255)}
@@ -69,8 +70,7 @@ def get_x_y_data(dir_path, img_size=(473,473), n_classes=3, n_samples=-1):
 
 def update_training_data():
     train_path = '/home/fredrik/sensorfusion/world_tracker/segmentation/training_data'
-    n_samples = 4400
-    x, y, x_paths, y_paths = get_x_y_data(train_path, n_samples=n_samples)
+    x, y, x_paths, y_paths = get_x_y_data(train_path)
     n_samples = len(x)
 
     n_train = int(0.8 * n_samples)
@@ -137,7 +137,7 @@ def get_compiled_model(model_name, lrn_rate, checkpoint=None):
             model.load_weights(h5_path)
     sgd = SGD(lr=lrn_rate, momentum=0.9, nesterov=True)
     model.compile(optimizer=sgd,
-                  loss=weighted_categorical_crossentropy([5.0, 10.0, 1.4]),
+                  loss=weighted_categorical_crossentropy([3.84, 6.25, 1.7]),
                   metrics=['accuracy'])
     return model
 
@@ -160,43 +160,40 @@ def overfit_test():
               epochs=1000,
               validation_data=(x_val, y_val))
 
-def train(resume_checkpoint_path=None):
+def train(model, lrn_rate):
     x_train, y_train = np.load('train_data/xy_train.npy')
     x_val, y_val = np.load('train_data/xy_val.npy')
     print(x_train.shape, y_train.shape)
     print(x_val.shape, y_val.shape)
 
-
-    model = get_compiled_model('pspnet50_custom', .5e-3, checkpoint=resume_checkpoint_path)
-
-    resumed = '' if resume_checkpoint_path is None else 'resumed'
-    checkpoint_path = 'checkpoints/'+resumed+'checkpoint-{epoch:03d}-{val_acc:.4f}.h5'
+    t_now = str(datetime.datetime.now()).replace(' ','_').replace(':','-')
+    os.mkdir('./checkpoints/{}'.format(t_now))
+    checkpoint_path = 'checkpoints/{}/checkpoint-lrn{}'.format(t_now, lrn_rate)+'-epoch{epoch:03d}-val_acc{val_acc:.4f}.h5'
     print(checkpoint_path)
     checkpoint_callback = ModelCheckpoint(checkpoint_path,
                                           monitor='val_acc',
                                           verbose=1,
-                                          save_best_only=True,
                                           mode='max',
                                           save_weights_only=True)
 
-    #tensorboard_callback = TensorBoard(log_dir='./Graph', histogram_freq=0, write_graph=True, write_images=True)
+    #os.mkdir('./Graph/{}'.format(t_now))
+    tensorboard_callback = TensorBoard(log_dir='./Graph/{}'.format(t_now), histogram_freq=0, write_graph=True, write_images=True)
 
     model.fit(x_train, y_train,
-              batch_size=16,
+              batch_size=4,
               epochs=100,
               validation_data=(x_val, y_val),
-              callbacks=[checkpoint_callback])
+              callbacks=[checkpoint_callback, tensorboard_callback])
 
-def evaluate_test(checkpoint_path):
-    print('EVALUATING ON TEST SET. LOADING CHECKPOINT: {}'.format(checkpoint_path))
+def evaluate_test(model):
+    print('EVALUATING ON TEST SET')
     x_test, y_test = np.load('train_data/xy_test.npy')
 
-    model = get_compiled_model('pspnet50_custom', .5e-3, checkpoint=checkpoint_path)
-    #score, acc = model.evaluate(x=x_test, y=y_test, batch_size=16, verbose=1)
-    #print('loss: {}'.format(score))
-    #print('acc: {}'.format(acc))
+    score, acc = model.evaluate(x=x_test, y=y_test, batch_size=16, verbose=1)
+    print('loss: {}'.format(score))
+    print('acc: {}'.format(acc))
     y_pred = model.predict(x_test, batch_size=16, verbose=1)
-    print('ANALYZING TEST DATA. CAN BE SLOW')
+    print('ANALYZING TEST DATA. CAN TAKE SEVERAL MINUTES.')
     cm = confusion_matrix(np.argmax(y_test, axis=3).flatten(), np.argmax(y_pred, axis=3).flatten())
     cm = cm.astype('float64')
     print('Class representation:')
@@ -235,12 +232,16 @@ def prediction_to_img(prediction):
 
 if __name__ == '__main__':
     #update_training_data()
-    #train()
+    lrn_rate = 1e-5
+    resume_checkpoint_path = 'checkpoints/2019-03-25_20-43-05.539417/checkpoint-lrn5e-05-epoch003-val_acc0.9823.h5'
+    model = get_compiled_model('pspnet50_all-train', lrn_rate, checkpoint=resume_checkpoint_path)
+    train(model, lrn_rate)
 
-    test_checkpoint = 'checkpoints/checkpoint-008-0.9692.h5'
-    #evaluate_test(test_checkpoint)
-    model = get_compiled_model('pspnet50_custom', .5e-3, checkpoint=test_checkpoint)
-    for i in range(160,200):
-        predict_single_test_image(model,i)
+    exit()
+    test_checkpoint = 'checkpoints/2019-03-25_20-43-05.539417/checkpoint-lrn5e-05-epoch003-val_acc0.9823.h5'
+    model = get_compiled_model('pspnet50_all-train', 0, checkpoint=test_checkpoint)
+    for i in range(400,450):
+        predict_single_test_image(model, i)
+    #evaluate_test(model)
 
 
