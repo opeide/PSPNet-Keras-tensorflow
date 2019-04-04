@@ -6,7 +6,8 @@ from keras.models import model_from_json
 from keras.optimizers import SGD
 import glob
 from PIL import Image
-from keras.callbacks import ModelCheckpoint, TensorBoard
+from keras.callbacks import ModelCheckpoint, TensorBoard, CSVLogger, ReduceLROnPlateau, Callback
+from keras.preprocessing.image import ImageDataGenerator
 import tensorflow as tf
 from keras import backend as K
 from sklearn.metrics import confusion_matrix
@@ -14,18 +15,18 @@ import datetime
 
 # red-0-sky, green-1-land, blue-2-sea
 CLASS_ENCODING = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255)}
-DATA_MEAN = np.array([[[123.68, 116.779, 103.939]]])  # RGB order
+#DATA_MEAN = np.array([[[123.68, 116.779, 103.939]]])  # RGB order
 
 def preprocess_img(img_pil):
-    centered_img = np.array(img_pil, dtype='float16')-DATA_MEAN
-    centered_img_bgr = centered_img[:, :, ::-1]
-    return centered_img_bgr
+    return np.array(img_pil, dtype='float16')
+    #centered_img = np.array(img_pil, dtype='float16')-DATA_MEAN
+    #centered_img_bgr = centered_img[:, :, ::-1]
+    #return centered_img_bgr
 
 def mask2img(mask_np):
     return Image.fromarray((mask_np * 255).astype('uint8'), 'L')
 
-def get_x_y_data(dir_path, img_size=(473,473), n_classes=3, n_samples=-1):
-    print('Loading x,y data')
+def parse_img_mask_data(dir_path, img_size=(473,473), n_classes=3, n_samples=-1):
     if n_samples < -1 or n_samples == 0:
         raise ValueError('Cannot create {} training samples'.format(n_samples))
 
@@ -33,11 +34,6 @@ def get_x_y_data(dir_path, img_size=(473,473), n_classes=3, n_samples=-1):
     mask_paths = sorted(glob.glob('{}/masks/*.png'.format(dir_path)))
     if not len(img_paths) == len(mask_paths):
         raise ValueError('Size mismatch: img paths and mask paths!')
-
-    shuffled_indices = np.arange(len(img_paths))
-    np.random.shuffle(shuffled_indices)
-    img_paths = np.array([img_paths[i] for i in shuffled_indices])
-    mask_paths = np.array([mask_paths[i] for i in shuffled_indices])
 
     if n_samples == -1:
         n_samples = len(img_paths)
@@ -47,56 +43,42 @@ def get_x_y_data(dir_path, img_size=(473,473), n_classes=3, n_samples=-1):
     x = np.zeros((n_samples,img_size[0], img_size[1],3), dtype='float16')
     y = np.zeros((n_samples, img_size[0], img_size[1], n_classes), dtype='float16')
 
-    print('loading imgs: ',end='')
+    print('Parsing {} imgs: '.format(n_samples),end='')
     for n,img_path in enumerate(img_paths[:n_samples]):
-        if n%(n_samples/10)==0:
+        if n%int(n_samples/10)==0:
             print('{}%->'.format(int(100*n/n_samples)), end='', flush=True)
         img = Image.open(img_path)
-        x[n,:,:,:] = preprocess_img(img)
+        x[n,:,:,:] =  (img)
     print('100%')
 
-    print('loading masks: ', end='')
+    print('Parsing {} masks: '.format(n_samples), end='')
     for n, mask_path in enumerate(mask_paths[:n_samples]):
-        if n%(n_samples/10)==0:
+        if n%int(n_samples/10)==0:
             print('{}%->'.format(int(100*n/n_samples)), end='', flush=True)
         mask_img = Image.open(mask_path)
         mask_np = np.array(mask_img)
         for class_id, color in CLASS_ENCODING.items():
             class_mask = np.all(mask_np == color, axis=2).astype('float16')
             y[n,:,:,class_id] = class_mask
-            #Image.fromarray(class_mask.astype(dtype=np.uint8)*255, 'L')
+            #Image.fromarray(class_mask.astype(dtype=np.uint8)*255, 'L').save('mask_{}.png'.format(class_id))
     print('100%')
     return x, y, img_paths[:n_samples], mask_paths[:n_samples]
 
-def update_training_data():
-    train_path = '/home/fredrik/sensorfusion/world_tracker/segmentation/training_data'
-    x, y, x_paths, y_paths = get_x_y_data(train_path)
-    n_samples = len(x)
+#Parse and store (cache) training data
+def update_training_data(train_data_dir, n_samples=-1):
+    for partition in ['train', 'val', 'test']:
+        partition_data_dir = '{}/{}'.format(train_data_dir, partition)
+        print('Parsing {} data from {}'.format(partition.upper(), partition_data_dir))
+        x, y, x_paths, y_paths = parse_img_mask_data(partition_data_dir, n_samples=n_samples)
+        print('saving numpy XY data')
+        np.save('{}/xy_data_{}.npy'.format(train_data_dir, partition), (x, y))
+        print('saving used img paths')
+        with open('{}/paths_x_data_{}.txt'.format(train_data_dir, partition), 'w+') as f:
+            f.write('\n'.join(x_paths))
+        print('saving used mask paths')
+        with open('{}/paths_y_data_{}.txt'.format(train_data_dir, partition), 'w+') as f:
+            f.write('\n'.join(y_paths))
 
-    n_train = int(0.8 * n_samples)
-
-    x_train = x[:int(0.8 * n_train)]
-    y_train = y[:int(0.8 * n_train)]
-    x_train_paths = x_paths[:int(0.8 * n_train)]
-    y_train_paths = y_paths[:int(0.8 * n_train)]
-    x_val = x[int(0.8 * n_train):n_train]
-    y_val = y[int(0.8 * n_train):n_train]
-    x_val_paths = x_paths[int(0.8 * n_train):n_train]
-    y_val_paths = y_paths[int(0.8 * n_train):n_train]
-    x_test = x[n_train:]
-    y_test = y[n_train:]
-    x_test_paths = x_paths[n_train:]
-    y_test_paths = y_paths[n_train:]
-    
-    np.save('train_data/xy_train.npy', (x_train, y_train))
-    np.save('train_data/xy_val.npy', (x_val, y_val))
-    np.save('train_data/xy_test.npy', (x_test, y_test))
-
-    for fileName, paths in [('x_train_paths',x_train_paths),('y_train_paths',y_train_paths),
-                           ('x_val_paths',x_val_paths),('y_val_paths',y_val_paths),
-                           ('x_test_paths',x_test_paths),('y_test_paths',y_test_paths)]:
-        with open('train_data/{}.txt'.format(fileName), 'w+') as f:
-            f.write('\n'.join(paths))
 
 def weighted_categorical_crossentropy(weights):
     """ weighted_categorical_crossentropy
@@ -130,12 +112,13 @@ def get_compiled_model(model_name, lrn_rate, checkpoint=None):
         with open(json_path, 'r') as file_handle:
             model = model_from_json(file_handle.read())
         if checkpoint is not None and isfile(checkpoint):
-            print('LOADED CHECKPOINT')
+            print('LOADING CHECKPOINT')
             model.load_weights(checkpoint)
         else:
-            print('LOADED START WEIGHTS')
+            print('LOADING START WEIGHTS')
             model.load_weights(h5_path)
     sgd = SGD(lr=lrn_rate, momentum=0.9, nesterov=True)
+    print('COMPILING MODEL')
     model.compile(optimizer=sgd,
                   loss=weighted_categorical_crossentropy([3.84, 6.25, 1.7]),
                   metrics=['accuracy'])
@@ -160,34 +143,78 @@ def overfit_test():
               epochs=1000,
               validation_data=(x_val, y_val))
 
+class LRLogger(Callback):
+    def __init__(self, saveDir):
+        self.fileName = '{}/lrn_history.txt'.format(saveDir)
+        with open(self.fileName, 'w+') as f:
+            f.write('epoch,lrn_rate\n')
+    def on_epoch_begin(self, epoch, logs=None):
+        with open(self.fileName, 'a+') as f:
+            f.write('{},{}\n'.format(epoch, K.eval(self.model.optimizer.lr)))
+
 def train(model, lrn_rate):
-    x_train, y_train = np.load('train_data/xy_train.npy')
-    x_val, y_val = np.load('train_data/xy_val.npy')
-    print(x_train.shape, y_train.shape)
-    print(x_val.shape, y_val.shape)
+    #todo: generate txt with training info, like lrn_rate
+    print('LOADING TRAINING DATA')
+    x_train, y_train = np.load('/media/fredrik/WDusbdrive/segmentation_training_data/xy_data_train.npy')
+    x_val, y_val = np.load('/media/fredrik/WDusbdrive/segmentation_training_data/xy_data_val.npy')
+    print('trainX: {}, trainY: {}'.format(x_train.shape, y_train.shape))
+    print('valX: {}, valY: {}'.format(x_val.shape, y_val.shape))
+    print('LOADED TRAINING DATA')
 
     t_now = str(datetime.datetime.now()).replace(' ','_').replace(':','-')
-    os.mkdir('./checkpoints/{}'.format(t_now))
-    checkpoint_path = 'checkpoints/{}/checkpoint-lrn{}'.format(t_now, lrn_rate)+'-epoch{epoch:03d}-val_acc{val_acc:.4f}.h5'
-    print(checkpoint_path)
+    keras_logdir = '/media/fredrik/WDusbdrive/keras_logdir/{}'.format(t_now)
+    os.mkdir(keras_logdir)
+
+    checkpoint_path = keras_logdir+'/checkpoint-epoch{epoch:03d}.h5'
     checkpoint_callback = ModelCheckpoint(checkpoint_path,
                                           monitor='val_acc',
                                           verbose=1,
                                           mode='max',
                                           save_weights_only=True)
 
-    #os.mkdir('./Graph/{}'.format(t_now))
-    tensorboard_callback = TensorBoard(log_dir='./Graph/{}'.format(t_now), histogram_freq=0, write_graph=True, write_images=True)
+    history_callback = CSVLogger('{}/training.log'.format(keras_logdir))
 
-    model.fit(x_train, y_train,
-              batch_size=4,
-              epochs=100,
+    tensorboard_logdir = '/media/fredrik/WDusbdrive/tensorboard_logdir/{}'.format(t_now)
+    tensorboard_callback = TensorBoard(log_dir=tensorboard_logdir, histogram_freq=0, write_graph=True, write_images=True)
+
+    reduce_lr_callback = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5)
+
+    lr_logger_callback = LRLogger(keras_logdir)
+
+    datagen_args = dict(
+        rotation_range=20,
+        zoom_range=[0.6, 1.2],
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        shear_range=0.15,
+        horizontal_flip=True,
+        fill_mode='reflect'
+    )
+
+    img_datagen = ImageDataGenerator(**datagen_args)
+    mask_datagen = ImageDataGenerator(**datagen_args)
+    seed = 1 #arbitrary seed
+    img_flow = img_datagen.flow(x_train, batch_size=4, seed=seed, save_prefix='img')
+    mask_flow = mask_datagen.flow(y_train, batch_size=4, seed=seed, save_prefix='mask')
+    train_flow =  zip(img_flow, mask_flow)
+
+    with open('{}/train_args.txt'.format(keras_logdir), 'w+'.format(keras_logdir)) as f:
+        f.write('t_start: {}\n'.format(t_now))
+        f.write('lrn_rate: {}\n'.format(lrn_rate))
+        f.write('data_augmentation: {}\n'.format(datagen_args))
+        f.write('x_train: {} y_train {}\n'.format(x_train.shape, y_train.shape))
+        f.write('x_val: {} y_val {}\n'.format(x_val.shape, y_val.shape))
+
+    model.fit_generator(train_flow,
+              steps_per_epoch=x_train.shape[0]//4,
+              epochs=500,
               validation_data=(x_val, y_val),
-              callbacks=[checkpoint_callback, tensorboard_callback])
+              callbacks=[checkpoint_callback, tensorboard_callback, history_callback, reduce_lr_callback, lr_logger_callback],
+                        verbose=1)
 
 def evaluate_test(model):
     print('EVALUATING ON TEST SET')
-    x_test, y_test = np.load('train_data/xy_test.npy')
+    x_test, y_test = np.load('/media/fredrik/WDusbdrive/segmentation_training_data/xy_data_test.npy')
 
     score, acc = model.evaluate(x=x_test, y=y_test, batch_size=16, verbose=1)
     print('loss: {}'.format(score))
@@ -206,12 +233,12 @@ def evaluate_test(model):
         print(cm)
 
 def predict_single_test_image(model, n):
-    with open('train_data/x_test_paths.txt', 'r') as f:
+    with open('/media/fredrik/WDusbdrive/segmentation_training_data/paths_x_data_test.txt', 'r') as f:
         x_paths = [path.strip() for path in f.readlines()]
         print(x_paths)
-        predict_img(model, x_paths[n])
+        predict_img_path(model, x_paths[n])
 
-def predict_img(model, img_path):
+def predict_img_path(model, img_path):
     img_pil = Image.open(img_path)
     x = np.array([preprocess_img(img_pil)])
 
@@ -231,16 +258,17 @@ def prediction_to_img(prediction):
 
 
 if __name__ == '__main__':
-    #update_training_data()
-    lrn_rate = 1e-5
-    resume_checkpoint_path = 'checkpoints/2019-03-25_20-43-05.539417/checkpoint-lrn5e-05-epoch003-val_acc0.9823.h5'
-    model = get_compiled_model('pspnet50_all-train', lrn_rate, checkpoint=resume_checkpoint_path)
+    #update_training_data('/media/fredrik/WDusbdrive/segmentation_training_data')
+    #exit()
+    lrn_rate = 5e-4
+    #resume_checkpoint_path = 'checkpoints/2019-03-26_13-50-20.472560/checkpoint-lrn5e-05-epoch012-val_acc0.9857.h5'
+    model = get_compiled_model('pspnet50_all-train', lrn_rate)
     train(model, lrn_rate)
-
     exit()
-    test_checkpoint = 'checkpoints/2019-03-25_20-43-05.539417/checkpoint-lrn5e-05-epoch003-val_acc0.9823.h5'
+
+    test_checkpoint = '/media/fredrik/WDusbdrive/keras_logdir/2019-04-04_10-58-56.785302/checkpoint-epoch060.h5'
     model = get_compiled_model('pspnet50_all-train', 0, checkpoint=test_checkpoint)
-    for i in range(400,450):
+    for i in range(150,200):
         predict_single_test_image(model, i)
     #evaluate_test(model)
 
