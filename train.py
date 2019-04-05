@@ -6,12 +6,13 @@ from keras.models import model_from_json
 from keras.optimizers import SGD
 import glob
 from PIL import Image
-from keras.callbacks import ModelCheckpoint, TensorBoard, CSVLogger, ReduceLROnPlateau, Callback
+from keras.callbacks import ModelCheckpoint, TensorBoard, ReduceLROnPlateau, Callback, LearningRateScheduler
 from keras.preprocessing.image import ImageDataGenerator
 import tensorflow as tf
 from keras import backend as K
 from sklearn.metrics import confusion_matrix
 import datetime
+from plot_history import plot_training_log
 
 # red-0-sky, green-1-land, blue-2-sea
 CLASS_ENCODING = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255)}
@@ -143,17 +144,28 @@ def overfit_test():
               epochs=1000,
               validation_data=(x_val, y_val))
 
-class LRLogger(Callback):
+class TrainingLogger(Callback):
     def __init__(self, saveDir):
-        self.fileName = '{}/lrn_history.txt'.format(saveDir)
-        with open(self.fileName, 'w+') as f:
-            f.write('epoch,lrn_rate\n')
-    def on_epoch_begin(self, epoch, logs=None):
-        with open(self.fileName, 'a+') as f:
-            f.write('{},{}\n'.format(epoch, K.eval(self.model.optimizer.lr)))
+        self.logPath = '{}/training.log'.format(saveDir)
+        with open(self.logPath, 'w+') as f:
+            f.write('epoch,acc,loss,val_acc,val_loss,lrn_rate\n')
+    def on_epoch_end(self, epoch, logs=None):
+        print('end')
+        print(logs)
+        with open(self.logPath, 'a+') as f:
+            f.write('{epoch},{acc},{loss},{val_acc},{val_loss},{lrn_rate}\n'.format(epoch=epoch,
+                                                                                    acc=logs['acc'],
+                                                                                    loss=logs['loss'],
+                                                                                    val_acc=logs['val_acc'],
+                                                                                    val_loss=logs['val_loss'],
+                                                                                    lrn_rate=logs['lr']))
+        plot_training_log(self.logPath)
+
+def get_step_decay_schedule(lrn_rate, decay_factor, step_duration):
+    schedule = lambda epoch: lrn_rate*decay_factor**(epoch//step_duration)
+    return schedule
 
 def train(model, lrn_rate):
-    #todo: generate txt with training info, like lrn_rate
     print('LOADING TRAINING DATA')
     x_train, y_train = np.load('/media/fredrik/WDusbdrive/segmentation_training_data/xy_data_train.npy')
     x_val, y_val = np.load('/media/fredrik/WDusbdrive/segmentation_training_data/xy_data_val.npy')
@@ -172,14 +184,15 @@ def train(model, lrn_rate):
                                           mode='max',
                                           save_weights_only=True)
 
-    history_callback = CSVLogger('{}/training.log'.format(keras_logdir))
-
     tensorboard_logdir = '/media/fredrik/WDusbdrive/tensorboard_logdir/{}'.format(t_now)
     tensorboard_callback = TensorBoard(log_dir=tensorboard_logdir, histogram_freq=0, write_graph=True, write_images=True)
 
-    reduce_lr_callback = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5)
+    lrn_rate_decay = 0.5
+    lrn_rate_duration = 30
+    lr_schedule = get_step_decay_schedule(lrn_rate, lrn_rate_decay, lrn_rate_duration)
+    reduce_lr_callback = LearningRateScheduler(lr_schedule)
 
-    lr_logger_callback = LRLogger(keras_logdir)
+    logger_callback = TrainingLogger(keras_logdir)
 
     datagen_args = dict(
         rotation_range=20,
@@ -200,7 +213,9 @@ def train(model, lrn_rate):
 
     with open('{}/train_args.txt'.format(keras_logdir), 'w+'.format(keras_logdir)) as f:
         f.write('t_start: {}\n'.format(t_now))
-        f.write('lrn_rate: {}\n'.format(lrn_rate))
+        f.write('lrn_rate start: {}\n'.format(lrn_rate))
+        f.write('lrn_rate step decay factor: {}\n'.format(lrn_rate_decay))
+        f.write('lrn_rate step duration: {}\n'.format(lrn_rate_duration))
         f.write('data_augmentation: {}\n'.format(datagen_args))
         f.write('x_train: {} y_train {}\n'.format(x_train.shape, y_train.shape))
         f.write('x_val: {} y_val {}\n'.format(x_val.shape, y_val.shape))
@@ -209,7 +224,7 @@ def train(model, lrn_rate):
               steps_per_epoch=x_train.shape[0]//4,
               epochs=500,
               validation_data=(x_val, y_val),
-              callbacks=[checkpoint_callback, tensorboard_callback, history_callback, reduce_lr_callback, lr_logger_callback],
+              callbacks=[checkpoint_callback, tensorboard_callback, reduce_lr_callback, logger_callback],
                         verbose=1)
 
 def evaluate_test(model):
@@ -260,15 +275,14 @@ def prediction_to_img(prediction):
 if __name__ == '__main__':
     #update_training_data('/media/fredrik/WDusbdrive/segmentation_training_data')
     #exit()
-    lrn_rate = 5e-4
-    #resume_checkpoint_path = 'checkpoints/2019-03-26_13-50-20.472560/checkpoint-lrn5e-05-epoch012-val_acc0.9857.h5'
+    lrn_rate = 1e-3
     model = get_compiled_model('pspnet50_all-train', lrn_rate)
     train(model, lrn_rate)
     exit()
 
-    test_checkpoint = '/media/fredrik/WDusbdrive/keras_logdir/2019-04-04_10-58-56.785302/checkpoint-epoch060.h5'
+    test_checkpoint = '/media/fredrik/WDusbdrive/keras_logdir/2019-04-05_13-25-31.056466//checkpoint-epoch074.h5'
     model = get_compiled_model('pspnet50_all-train', 0, checkpoint=test_checkpoint)
-    for i in range(150,200):
+    for i in range(200,300):
         predict_single_test_image(model, i)
     #evaluate_test(model)
 
