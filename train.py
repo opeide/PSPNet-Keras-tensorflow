@@ -3,7 +3,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 from os.path import join, isfile
 import numpy as np
 from keras.models import model_from_json
-from keras.optimizers import SGD
+from keras.optimizers import SGD, adadelta
 import glob
 from PIL import Image
 from keras.callbacks import ModelCheckpoint, TensorBoard, ReduceLROnPlateau, Callback, LearningRateScheduler
@@ -105,7 +105,7 @@ def weighted_categorical_crossentropy(weights):
             raise ValueError('WeightedCategoricalCrossentropy: not valid with logits')
     return loss
 
-def get_compiled_model(model_name, lrn_rate, checkpoint=None):
+def get_compiled_model(model_name, lrn_rate, class_weights=[1.0,1.0,1.0], checkpoint=None):
     json_path = join("weights", "keras", model_name + ".json")
     h5_path = join("weights", "keras", model_name + ".h5")
     if isfile(json_path) and isfile(h5_path):
@@ -118,10 +118,11 @@ def get_compiled_model(model_name, lrn_rate, checkpoint=None):
         else:
             print('LOADING START WEIGHTS')
             model.load_weights(h5_path)
-    sgd = SGD(lr=lrn_rate, momentum=0.9, nesterov=True)
+    #optimizer = SGD(lr=lrn_rate, momentum=0.9, nesterov=True)
+    optimizer = adadelta()
     print('COMPILING MODEL')
-    model.compile(optimizer=sgd,
-                  loss=weighted_categorical_crossentropy([3.84, 6.25, 1.7]),
+    model.compile(optimizer=optimizer,
+                  loss=weighted_categorical_crossentropy(class_weights),
                   metrics=['accuracy'])
     return model
 
@@ -153,19 +154,22 @@ class TrainingLogger(Callback):
         print('end')
         print(logs)
         with open(self.logPath, 'a+') as f:
+            if 'lr' not in logs.keys():
+                logs['lr'] = 0
             f.write('{epoch},{acc},{loss},{val_acc},{val_loss},{lrn_rate}\n'.format(epoch=epoch,
                                                                                     acc=logs['acc'],
                                                                                     loss=logs['loss'],
                                                                                     val_acc=logs['val_acc'],
                                                                                     val_loss=logs['val_loss'],
                                                                                     lrn_rate=logs['lr']))
+
         plot_training_log(self.logPath)
 
 def get_step_decay_schedule(lrn_rate, decay_factor, step_duration):
     schedule = lambda epoch: lrn_rate*decay_factor**(epoch//step_duration)
     return schedule
 
-def train(model, lrn_rate):
+def train(model, lrn_rate, class_weights):
     print('LOADING TRAINING DATA')
     x_train, y_train = np.load('/media/fredrik/WDusbdrive/segmentation_training_data/xy_data_train.npy')
     x_val, y_val = np.load('/media/fredrik/WDusbdrive/segmentation_training_data/xy_data_val.npy')
@@ -177,7 +181,9 @@ def train(model, lrn_rate):
     keras_logdir = '/media/fredrik/WDusbdrive/keras_logdir/{}'.format(t_now)
     os.mkdir(keras_logdir)
 
-    checkpoint_path = keras_logdir+'/checkpoint-epoch{epoch:03d}.h5'
+    checkpoint_logdir = keras_logdir+'/checkpoints'
+    os.mkdir(checkpoint_logdir)
+    checkpoint_path = checkpoint_logdir+'/checkpoint-epoch{epoch:03d}.h5'
     checkpoint_callback = ModelCheckpoint(checkpoint_path,
                                           monitor='val_acc',
                                           verbose=1,
@@ -187,19 +193,19 @@ def train(model, lrn_rate):
     tensorboard_logdir = '/media/fredrik/WDusbdrive/tensorboard_logdir/{}'.format(t_now)
     tensorboard_callback = TensorBoard(log_dir=tensorboard_logdir, histogram_freq=0, write_graph=True, write_images=True)
 
-    lrn_rate_decay = 0.5
-    lrn_rate_duration = 30
+    lrn_rate_decay = 1
+    lrn_rate_duration = 999
     lr_schedule = get_step_decay_schedule(lrn_rate, lrn_rate_decay, lrn_rate_duration)
     reduce_lr_callback = LearningRateScheduler(lr_schedule)
 
     logger_callback = TrainingLogger(keras_logdir)
 
     datagen_args = dict(
-        rotation_range=20,
-        zoom_range=[0.6, 1.2],
-        width_shift_range=0.2,
+        rotation_range=25,
+        zoom_range=[0.5, 1.5],
+        width_shift_range=0.3,
         height_shift_range=0.2,
-        shear_range=0.15,
+        shear_range=0.2,
         horizontal_flip=True,
         fill_mode='reflect'
     )
@@ -213,6 +219,9 @@ def train(model, lrn_rate):
 
     with open('{}/train_args.txt'.format(keras_logdir), 'w+'.format(keras_logdir)) as f:
         f.write('t_start: {}\n'.format(t_now))
+        f.write('class weights: {}\n'.format(class_weights))
+        f.write('loss: {}\n'.format(str(model.loss)))
+        f.write('optimizer: {}\n'.format(str(model.optimizer)))
         f.write('lrn_rate start: {}\n'.format(lrn_rate))
         f.write('lrn_rate step decay factor: {}\n'.format(lrn_rate_decay))
         f.write('lrn_rate step duration: {}\n'.format(lrn_rate_duration))
@@ -224,34 +233,46 @@ def train(model, lrn_rate):
               steps_per_epoch=x_train.shape[0]//4,
               epochs=500,
               validation_data=(x_val, y_val),
-              callbacks=[checkpoint_callback, tensorboard_callback, reduce_lr_callback, logger_callback],
+              callbacks=[checkpoint_callback, tensorboard_callback, logger_callback],
                         verbose=1)
 
-def evaluate_test(model):
+def evaluate_test(model, results_path):
     print('EVALUATING ON TEST SET')
     x_test, y_test = np.load('/media/fredrik/WDusbdrive/segmentation_training_data/xy_data_test.npy')
 
     score, acc = model.evaluate(x=x_test, y=y_test, batch_size=16, verbose=1)
-    print('loss: {}'.format(score))
-    print('acc: {}'.format(acc))
     y_pred = model.predict(x_test, batch_size=16, verbose=1)
     print('ANALYZING TEST DATA. CAN TAKE SEVERAL MINUTES.')
-    cm = confusion_matrix(np.argmax(y_test, axis=3).flatten(), np.argmax(y_pred, axis=3).flatten())
-    cm = cm.astype('float64')
-    print('Class representation:')
-    for class_id in [0,1,2]:
-        print(class_id, sum(cm[class_id,:])/float(len(y_pred)*473*473))
-    for row in range(cm.shape[0]):
-        cm[row,:] = cm[row,:] / np.sum(cm[row,:])
-    with np.printoptions(precision=3, suppress=True):
-        print('CONFUSION MATRIX:')
-        print(cm)
+    cm_total = confusion_matrix(np.argmax(y_test, axis=3).flatten(), np.argmax(y_pred, axis=3).flatten())
+    cm_scaled = cm_total.astype('float64')
+    for row in range(cm_scaled.shape[0]):
+        cm_scaled[row,:] = cm_total[row,:] / np.sum(cm_total[row,:])
+
+    print('Writing results to {}'.format(results_path))
+    with open(results_path, 'w+') as f:
+        f.write('CONFUSION MATRIX:\n')
+        f.write('{}\n'.format(cm_scaled))
+        f.write('loss: {}\n'.format(score))
+        f.write('acc: {}\n'.format(acc))
+        f.write('Class representation:\n')
+        for class_id in [0, 1, 2]:
+            f.write('{}: {}\n'.format(class_id, float(sum(cm_total[class_id, :])) / float(len(y_pred) * 473 * 473)))
+
+
+
+def predict_all_test_imgs(model, out_dir):
+    with open('/media/fredrik/WDusbdrive/segmentation_training_data/paths_x_data_test.txt', 'r') as f:
+        x_paths = [path.strip() for path in f.readlines()]
+        print(x_paths)
+        for x_path in x_paths:
+            fileName = os.path.basename(x_path)
+            predict_img_path(model, x_path).save('{}/{}'.format(out_dir, fileName))
 
 def predict_single_test_image(model, n):
     with open('/media/fredrik/WDusbdrive/segmentation_training_data/paths_x_data_test.txt', 'r') as f:
         x_paths = [path.strip() for path in f.readlines()]
         print(x_paths)
-        predict_img_path(model, x_paths[n])
+        predict_img_path(model, x_paths[n]).show()
 
 def predict_img_path(model, img_path):
     img_pil = Image.open(img_path)
@@ -260,7 +281,7 @@ def predict_img_path(model, img_path):
     prediction = model.predict(x, batch_size=1, verbose=1)[0]
     prediction_img = prediction_to_img(prediction)
 
-    Image.blend(img_pil, prediction_img, 0.25).show()
+    return Image.blend(img_pil, prediction_img, 0.25)
 
 def prediction_to_img(prediction):
     max_class = np.argmax(prediction,axis=2)
@@ -273,17 +294,31 @@ def prediction_to_img(prediction):
 
 
 if __name__ == '__main__':
-    #update_training_data('/media/fredrik/WDusbdrive/segmentation_training_data')
-    #exit()
-    lrn_rate = 1e-3
-    model = get_compiled_model('pspnet50_all-train', lrn_rate)
-    train(model, lrn_rate)
-    exit()
+    action = 'update'
 
-    test_checkpoint = '/media/fredrik/WDusbdrive/keras_logdir/2019-04-05_13-25-31.056466//checkpoint-epoch074.h5'
-    model = get_compiled_model('pspnet50_all-train', 0, checkpoint=test_checkpoint)
-    for i in range(200,300):
-        predict_single_test_image(model, i)
-    #evaluate_test(model)
+    if action == 'update':
+        update_training_data('/media/fredrik/WDusbdrive/segmentation_training_data')
+
+    elif action == 'train':
+        lrn_rate = 1e-3
+        class_weights = [1/0.23, 1/0.15, 1/0.62]
+        print(class_weights)
+        model = get_compiled_model('pspnet50_all-train', lrn_rate, class_weights)
+        train(model, lrn_rate, class_weights)
+
+    elif action == 'test':
+        time_string = '2019-04-11_16-37-44.928196'
+        epoch = 45
+        base_dir = '/media/fredrik/WDusbdrive/keras_logdir/{}'.format(time_string)
+        test_checkpoint = '{}/checkpoints/checkpoint-epoch{:03d}.h5'.format(base_dir, epoch)
+        model = get_compiled_model('pspnet50_all-train', 0, checkpoint=test_checkpoint)
+
+        predict_out_dir = base_dir+'/test_predictions_epoch{:03d}'.format(epoch)
+        if not os.path.exists(predict_out_dir):
+            os.mkdir(predict_out_dir)
+        predict_all_test_imgs(model, predict_out_dir)
+
+        results_path = '{}/test_results_epoch{:03d}.txt'.format(base_dir, epoch)
+        evaluate_test(model, results_path)
 
 

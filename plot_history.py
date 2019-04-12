@@ -55,16 +55,17 @@ def plot_training_log(log_path):
     plt.savefig('{}/plot_loss.eps'.format(log_dir), format='eps', bbox_inches='tight',dpi=1200)
 
     #PLOT LEARN RATE
-    plt.figure(2)
-    plt.axes().get_xaxis().set_major_locator(MaxNLocator(integer=True)) #force whole numbers on x axis
-    plt.xticks(fontsize=12)
-    plt.yticks(fontsize=12)
-    plt.xlabel('Epoch', fontsize=15)
-    plt.ylabel('lrn_rate', fontsize=15)
-    plt.ylim(0, 1.1*max(dataDict['lrn_rate']))
-    plt.plot(dataDict['epoch'], dataDict['lrn_rate'], color='red')
-    plt.grid(b=True, which='both')
-    plt.savefig('{}/plot_lrn_rate.eps'.format(log_dir), format='eps', bbox_inches='tight',dpi=1200)
+    if 'lrn_rate' in dataDict.keys():
+        plt.figure(2)
+        plt.axes().get_xaxis().set_major_locator(MaxNLocator(integer=True)) #force whole numbers on x axis
+        plt.xticks(fontsize=12)
+        plt.yticks(fontsize=12)
+        plt.xlabel('Epoch', fontsize=15)
+        plt.ylabel('lrn_rate', fontsize=15)
+        plt.ylim(0, 1.1*max(dataDict['lrn_rate']))
+        plt.plot(dataDict['epoch'], dataDict['lrn_rate'], color='red')
+        plt.grid(b=True, which='both')
+        plt.savefig('{}/plot_lrn_rate.eps'.format(log_dir), format='eps', bbox_inches='tight',dpi=1200)
 
 
 if __name__ == '__main__':
